@@ -1,0 +1,509 @@
+#!/usr/bin/env python3
+"""
+GENIA (Genomically and Environmentally Networked Intelligent Assemblies) Framework
+Implementation for synthetic microbial community design for pollutant degradation.
+
+This module provides a comprehensive computational framework for the rational design
+of synthetic microbial communities capable of multi-pollutant degradation. The framework
+integrates high-throughput genomic analysis, metabolic network modeling, and machine
+learning algorithms to optimize community composition for enhanced biodegradation efficiency.
+
+Publication: Machine Learning-Guided Synthetic Microbial Communities Enable Functional and Sustainable Degradation of Persistent Environmental Pollutants (2025)
+Authors: Esaú De la Vega-Camarillo et al.
+License: MIT
+Version: 1.0
+"""
+
+import numpy as np
+import pandas as pd
+import networkx as nx
+from sklearn.preprocessing import StandardScaler
+from scipy import interpolate
+from scipy.stats import entropy
+import warnings
+from typing import Dict, List, Union
+from networkx.algorithms import community
+import community as community_louvain
+import matplotlib.pyplot as plt
+
+warnings.filterwarnings('ignore')
+
+class GenomicEncoder:
+    """
+    Module 1: Genomic Encoding (phi)
+    
+    Transforms raw genomic data (e.g., enzyme gene counts) into a quantitative,
+    biologically-informed feature space using spline transformations. This module
+    captures non-linear relationships between genomic potential and observed phenotype.
+    """
+
+    def __init__(self, data: pd.DataFrame):
+        """
+        Initializes the GenomicEncoder.
+
+        Args:
+            data (pd.DataFrame): A DataFrame where rows are microbial strains and
+                                 columns are genomic features (e.g., enzyme copy numbers).
+        """
+        if data.empty:
+            raise ValueError("Input DataFrame for GenomicEncoder cannot be empty.")
+        self.data = data
+        self.spline_models = {}
+        self.scalar = StandardScaler()
+
+    def apply_spline_transformation(self, k: int = 3, s: float = 0.5) -> pd.DataFrame:
+        """
+        Applies a cubic spline transformation to each genomic feature.
+
+        This non-linear transformation smooths noisy data and captures complex
+        genotype-phenotype relationships.
+
+        Args:
+            k (int): Degree of the spline (e.g., k=3 for cubic splines).
+            s (float): A smoothing factor. A higher value means more smoothing.
+
+        Returns:
+            pd.DataFrame: A DataFrame of the transformed genomic features.
+        """
+        transformed_data = pd.DataFrame(index=self.data.index, columns=self.data.columns)
+        for col in self.data.columns:
+            x = self.data[col].values
+            y = np.linspace(0, 1, len(x))
+            try:
+                # B-spline for non-linear feature encoding
+                tck = interpolate.splrep(x, y, k=k, s=s)
+                transformed_values = interpolate.splev(x, tck, der=0)
+                transformed_data[col] = transformed_values
+                self.spline_models[col] = tck
+            except ValueError as e:
+                warnings.warn(f"Could not apply spline to column '{col}'. Using raw data. Error: {e}")
+                transformed_data[col] = x
+        
+        # Scale the transformed data for consistent input to ML models
+        scaled_data = self.scalar.fit_transform(transformed_data)
+        return pd.DataFrame(scaled_data, index=self.data.index, columns=self.data.columns)
+
+class PathwayIntegrator:
+    """
+    Module 2: Pathway Integration (Psi)
+
+    Constructs a composite metabolic network graph by merging individual strain
+    metabolic profiles. The graph represents metabolite exchange and enzymatic
+    connectivity among community members.
+    """
+
+    def __init__(self, genomic_data: pd.DataFrame, connections: Dict):
+        """
+        Initializes the PathwayIntegrator.
+
+        Args:
+            genomic_data (pd.DataFrame): The genomic data (e.g., from GenomicEncoder).
+            connections (Dict): A dictionary defining known metabolic pathway connections
+                                and metabolite exchange rules.
+        """
+        self.genomic_data = genomic_data
+        self.connections = connections
+        self.graph = nx.DiGraph()
+
+    def build_network(self) -> nx.DiGraph:
+        """
+        Builds the metabolic network graph.
+
+        The graph includes nodes for strains, enzymes, substrates, and products.
+        Edges represent functional relationships and metabolite flow.
+
+        Returns:
+            nx.DiGraph: The constructed metabolic network.
+        """
+        # Add strain nodes
+        for strain in self.genomic_data.index:
+            self.graph.add_node(strain, type='strain')
+
+        # Add enzyme nodes and edges to strains
+        for enzyme in self.genomic_data.columns:
+            self.graph.add_node(enzyme, type='enzyme')
+            for strain in self.genomic_data.index:
+                if self.genomic_data.loc[strain, enzyme] > 0:
+                    self.graph.add_edge(strain, enzyme, weight=self.genomic_data.loc[strain, enzyme], relation='possesses')
+
+        # Add substrate, intermediate, and product nodes based on connections
+        for pathway, rules in self.connections.items():
+            for rule in rules:
+                if '->' in rule:
+                    source, target = rule.split('->')
+                    source = source.strip()
+                    target = target.strip()
+                    self.graph.add_node(source, type='metabolite')
+                    self.graph.add_node(target, type='metabolite')
+                    self.graph.add_edge(source, target, relation='produces')
+        
+        return self.graph
+
+    def analyze_connectivity(self) -> Dict:
+        """
+        Analyzes key network metrics like centrality and hub strains.
+
+        Returns:
+            Dict: A dictionary of network analysis results.
+        """
+        if self.graph.number_of_nodes() == 0:
+            return {}
+
+        metrics = {
+            'degree_centrality': nx.degree_centrality(self.graph),
+            'betweenness_centrality': nx.betweenness_centrality(self.graph)
+        }
+        return metrics
+
+class RedundancyReducer:
+    """
+    Module 3: Redundancy Reduction (Psi^r)
+
+    Minimizes functional redundancy within the community using information theory.
+    This module identifies and removes strains with overlapping capabilities to
+    promote a minimal, efficient, and ecologically coherent consortium.
+    """
+
+    def __init__(self, encoded_data: pd.DataFrame):
+        """
+        Initializes the RedundancyReducer.
+
+        Args:
+            encoded_data (pd.DataFrame): The encoded genomic data from GenomicEncoder.
+        """
+        self.data = encoded_data
+
+    def calculate_functional_entropy(self) -> pd.DataFrame:
+        """
+        Calculates the Shannon entropy for each strain's enzymatic profile.
+
+        High entropy suggests a more functionally diverse, "generalist" strain.
+
+        Returns:
+            pd.DataFrame: A DataFrame with strain names and their entropy scores.
+        """
+        data_normalized = self.data.div(self.data.sum(axis=1), axis=0).fillna(0)
+        strain_entropy = entropy(data_normalized.T)
+        return pd.DataFrame(strain_entropy, index=self.data.index, columns=['Shannon_Entropy'])
+
+    def minimize_redundancy(self) -> pd.DataFrame:
+        """
+        Selects a non-redundant core community.
+
+        This method ranks strains by their functional entropy and then
+        identifies an optimal sub-community with minimal functional overlap.
+        It uses a greedy approach to build the community.
+
+        Returns:
+            pd.DataFrame: A DataFrame containing the selected strains and their scores.
+        """
+        strain_entropy = self.calculate_functional_entropy()
+        
+        # Identify the most functionally diverse strain (highest entropy)
+        sorted_strains = strain_entropy.sort_values(by='Shannon_Entropy', ascending=False)
+        selected_strains = sorted_strains.index.tolist()
+        
+        final_selection = []
+        covered_functions = set()
+        
+        for strain in selected_strains:
+            strain_functions = set(self.data.columns[self.data.loc[strain] > 0])
+            new_functions = strain_functions - covered_functions
+            
+            if new_functions:
+                final_selection.append(strain)
+                covered_functions.update(new_functions)
+        
+        return self.data.loc[final_selection]
+
+class CommunityPredictor:
+    """
+    Module 4: Machine Learning and Predictive Modeling
+
+    This module uses machine learning to predict community-level degradation potential.
+    It identifies an optimal community by balancing metabolic complementarity and
+    functional redundancy.
+    """
+
+    def __init__(self, genomic_data: pd.DataFrame, phenotypic_data: pd.DataFrame):
+        """
+        Initializes the CommunityPredictor.
+
+        Args:
+            genomic_data (pd.DataFrame): The encoded genomic data.
+            phenotypic_data (pd.DataFrame): A DataFrame of a single column containing
+                                            the observed degradation efficiency (phenotype)
+                                            for each strain.
+        """
+        if genomic_data.empty or phenotypic_data.empty:
+            raise ValueError("Genomic and phenotypic data cannot be empty.")
+        if genomic_data.index.symmetric_difference(phenotypic_data.index):
+            raise ValueError("Indices of genomic and phenotypic data must match.")
+
+        self.genomic_data = genomic_data
+        self.phenotypic_data = phenotypic_data
+        self.model = None
+
+    def train_model(self):
+        """
+        Trains a predictive model to map genomic features to degradation phenotype.
+
+        This method uses a RandomForestRegressor as a robust and interpretable
+        model for this task. It can be extended with Graph Neural Networks for more
+        advanced feature integration.
+        """
+        X = self.genomic_data
+        y = self.phenotypic_data.iloc[:, 0]
+        
+        self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+        self.model.fit(X, y)
+        print("Model trained successfully.")
+
+    def predict_community_performance(self, community_list: List[str]) -> float:
+        """
+        Predicts the collective degradation performance of a given community.
+
+        The model predicts the performance based on the combined genomic profile
+        of the selected strains.
+
+        Args:
+            community_list (List[str]): A list of strain names in the community.
+
+        Returns:
+            float: The predicted degradation efficiency of the community.
+        """
+        if self.model is None:
+            raise RuntimeError("Model has not been trained yet. Please call train_model().")
+        
+        community_profile = self.genomic_data.loc[community_list].mean(axis=0).values.reshape(1, -1)
+        predicted_performance = self.model.predict(community_profile)[0]
+        return predicted_performance
+
+    def find_optimal_community(self, num_members: int = 9) -> List[str]:
+        """
+        Identifies the optimal community composition.
+
+        This method performs a community detection analysis on the network
+        to find a coherent and high-performing consortium. It uses a Louvain
+        modularity-based approach to identify functional clusters.
+
+        Args:
+            num_members (int): The target number of strains in the final community.
+
+        Returns:
+            List[str]: A list of strain names comprising the optimal community.
+        """
+        print("Finding optimal community...")
+        # Placeholder for a more complex network-based search (e.g., GNNs)
+        # Using a community detection algorithm on a hypothetical interaction graph
+        # This part requires a network with strain-to-strain interaction edges,
+        # which would be derived from the PathwayIntegrator's analysis.
+        
+        # For a simplified, reproducible example, we will use a basic clustering approach.
+        # This can be replaced with GNNs from PyTorch or TensorFlow as described in the paper.
+        
+        # We assume a network has been created and populated with inter-strain edges.
+        # Let's create a placeholder interaction graph for this demonstration.
+        dummy_graph = nx.Graph()
+        for strain in self.genomic_data.index:
+            dummy_graph.add_node(strain)
+
+        # Using a Louvain method for community detection
+        partition = community_louvain.best_partition(dummy_graph)
+        communities = {}
+        for strain, com_id in partition.items():
+            if com_id not in communities:
+                communities[com_id] = []
+            communities[com_id].append(strain)
+
+        # Select the largest community as the most functionally coherent one
+        selected_community = max(communities.values(), key=len)
+        
+        # Reduce the community to the target size by selecting the most central members
+        if len(selected_community) > num_members:
+            centrality = nx.degree_centrality(dummy_graph.subgraph(selected_community))
+            sorted_by_centrality = sorted(centrality.keys(), key=centrality.get, reverse=True)
+            return sorted_by_centrality[:num_members]
+        else:
+            return selected_community
+
+class GENIAFramework:
+    """
+    Main orchestrator for the GENIA framework.
+    """
+
+    def __init__(self, genomic_data: pd.DataFrame, phenotypic_data: pd.DataFrame):
+        """
+        Initializes the full GENIA pipeline with input data.
+
+        Args:
+            genomic_data (pd.DataFrame): Raw genomic data (strains x enzymes).
+            phenotypic_data (pd.DataFrame): Experimental degradation data (strains x performance).
+        """
+        self.genomic_data = genomic_data
+        self.phenotypic_data = phenotypic_data
+        self.gene_db = self._load_gene_database()
+        
+        self.encoder = GenomicEncoder(self.genomic_data)
+        self.integrator = PathwayIntegrator(self.genomic_data, self.gene_db.pathway_connections)
+        self.reducer = RedundancyReducer(self.genomic_data)
+        self.predictor = CommunityPredictor(self.genomic_data, self.phenotypic_data)
+
+    def _load_gene_database(self):
+        """
+        A placeholder for loading a real-world, comprehensive gene database.
+        This function should be replaced with a robust database connection
+        to a resource like a file or a database.
+        
+        Returns:
+            BiodegradationGeneDatabase: A dummy database object.
+        """
+        class BiodegradationGeneDatabase:
+            def __init__(self):
+                self.gene_database = {
+                    'lignin_degradation': {'lignin_peroxidase': {}, 'vanillate_demethylase': {}},
+                    'atrazine_degradation': {'atrazine_chlorohydrolase': {}, 'cyanuric_acid_hydrolase': {}},
+                    'pfas_degradation': {'haloalkane_dehalogenase': {}, 'fluoride_efflux_transporter': {}}
+                }
+                self.pathway_connections = {
+                    'lignin_to_central': ['lignin_peroxidase -> vanillate'],
+                    'atrazine_to_nitrogen': ['atrazine_chlorohydrolase -> ammonia'],
+                    'pfas_defluorination': ['haloalkane_dehalogenase -> fluoride']
+                }
+                self.get_all_enzymes = lambda: {f"{p}_{e}": {} for p, es in self.gene_database.items() for e in es}
+        return BiodegradationGeneDatabase()
+
+    def run_pipeline(self, num_members: int = 9):
+        """
+        Executes the full GENIA pipeline from data encoding to community prediction.
+
+        Args:
+            num_members (int): The number of strains to select for the final community.
+
+        Returns:
+            Tuple: A tuple containing the final selected community, its predicted performance,
+                   and intermediate results.
+        """
+        print("Starting GENIA pipeline...")
+        
+        # Step 1: Genomic Encoding
+        print("1. Performing genomic encoding...")
+        encoded_data = self.encoder.apply_spline_transformation()
+
+        # Step 2: Pathway Integration (Network Construction)
+        print("2. Building metabolic network...")
+        self.integrator.genomic_data = encoded_data
+        network = self.integrator.build_network()
+        network_metrics = self.integrator.analyze_connectivity()
+
+        # Step 3: Redundancy Reduction
+        print("3. Reducing functional redundancy...")
+        self.reducer.data = encoded_data
+        non_redundant_strains = self.reducer.minimize_redundancy()
+        print(f"   Selected non-redundant core: {non_redundant_strains.shape[0]} strains.")
+        
+        # Step 4: Predictive Modeling and Community Selection
+        print("4. Training predictive model and selecting community...")
+        self.predictor.genomic_data = encoded_data
+        self.predictor.phenotypic_data = self.phenotypic_data
+        self.predictor.train_model()
+        
+        final_community = self.predictor.find_optimal_community(num_members=num_members)
+        if not final_community:
+            raise RuntimeError("Could not find a valid community. Please check input data.")
+            
+        predicted_performance = self.predictor.predict_community_performance(final_community)
+        
+        print(f"Pipeline complete. Selected community: {final_community}")
+        print(f"Predicted degradation efficiency: {predicted_performance:.2f}")
+
+        results = {
+            'final_community': final_community,
+            'predicted_performance': predicted_performance,
+            'encoded_data': encoded_data,
+            'network': network,
+            'network_metrics': network_metrics,
+            'non_redundant_strains': non_redundant_strains
+        }
+        
+        return results
+
+def main():
+    """
+    Main function to demonstrate the GENIA framework workflow.
+    
+    This function generates dummy data to showcase the pipeline's structure
+    and functionality. For real-world use, replace the data generation with
+    loading from a CSV or other data source.
+    """
+    
+    print("GENIA Framework: Demonstrating Full Pipeline Workflow")
+    print("-----------------------------------------------------")
+    
+    # -----------------------------------------------------------
+    # Data Simulation (REPLACE WITH REAL DATA LOADING)
+    # This section simulates the data that would be obtained from
+    # genomic annotation and experimental screening.
+    # -----------------------------------------------------------
+    num_strains = 45
+    num_enzymes = 46
+    np.random.seed(42)
+    
+    strain_names = [f'Strain_{i:02d}' for i in range(num_strains)]
+    enzyme_names = [f'Enzyme_{i:02d}' for i in range(num_enzymes)]
+    
+    # Simulate genomic data (non-negative integers for gene copy numbers)
+    raw_genomic_data = pd.DataFrame(
+        np.random.poisson(lam=1.5, size=(num_strains, num_enzymes)),
+        index=strain_names,
+        columns=enzyme_names
+    )
+    
+    # Simulate phenotypic data (degradation efficiency, e.g., 0-100%)
+    phenotypic_data = pd.DataFrame(
+        np.random.rand(num_strains) * 100,
+        index=strain_names,
+        columns=['Degradation_Efficiency']
+    )
+    
+    # -----------------------------------------------------------
+    # Initialize and Run the GENIA Pipeline
+    # -----------------------------------------------------------
+    try:
+        genia = GENIAFramework(genomic_data=raw_genomic_data, phenotypic_data=phenotypic_data)
+        results = genia.run_pipeline(num_members=9)
+
+        # -----------------------------------------------------------
+        # Post-Pipeline Analysis and Visualization
+        # -----------------------------------------------------------
+        print("\n--- Final Analysis ---")
+        
+        # Display key results
+        print(f"Selected Community: {results['final_community']}")
+        print(f"Predicted Performance: {results['predicted_performance']:.2f}%")
+        
+        # Visualize the non-redundant strain selection
+        redundancy_plot_data = pd.concat([
+            results['encoded_data'].sum(axis=1).rename('Total_Capacity'),
+            results['non_redundant_strains'].sum(axis=1).rename('Non_Redundant_Capacity')
+        ], axis=1).fillna(0)
+        
+        plt.figure(figsize=(12, 6))
+        redundancy_plot_data.sort_values(by='Total_Capacity', ascending=False).plot(
+            kind='bar', color=['skyblue', 'salmon']
+        )
+        plt.title('Strain Capacity: Total vs. Non-Redundant')
+        plt.xlabel('Strain')
+        plt.ylabel('Sum of Encoded Gene Counts')
+        plt.xticks(rotation=90)
+        plt.tight_layout()
+        plt.savefig('genia_redundancy_analysis.png')
+        print("Saved redundancy analysis plot to 'genia_redundancy_analysis.png'")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+    except RuntimeError as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
