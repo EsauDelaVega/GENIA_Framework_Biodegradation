@@ -1,11 +1,60 @@
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Data files (DO NOT upload genomes - too large)
 *.fna
 *.fasta
 *.fastq
+*.fa
+*.fq
+*.gz
+*.bam
+*.sam
 data/genomes/
+data/raw/
+*.h5
+*.hdf5
+
+# Output files
 outputs/
+results/
 *.pkl
+*.pickle
+models/*.pt
+models/*.pth
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# IDEs
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# Logs
 *.log
+logs/
+
+# Environment variables
+.env
+.venv
