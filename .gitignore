@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.fna
+*.fasta
+*.fastq
+data/genomes/
+outputs/
+*.pkl
+.vscode/
+.DS_Store
+*.log
