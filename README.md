@@ -547,8 +547,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Lead Developer**: Esaú De la Vega-Camarillo
 - **Principal Investigator**: Dr. Sanjay Antony-Babu & Dr. Won Bo Shim
 - **Institution**: Texas A&M University
-- **Email**: [your-email@tamu.edu]
-- **GitHub**: [https://github.com/[your-lab]/GENIA]
+- **Email**: [esaudelavega@tamu.edu]
+- **GitHub**: [https://github.com/EsauDelaVega/GENIA]
 
 ---
 
